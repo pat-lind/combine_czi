@@ -1,26 +1,26 @@
 import argparse
-from pylibCZIrw import czi as czi
+from pylibCZIrw import czi
+import matplotlib.pyplot as plt
+import SimpleITK as sitk
+import cv2
+import numpy as np
 from czitools.metadata_tools.czi_metadata import CziChannelInfo
 from scipy.signal import find_peaks
-import numpy as np
-import cv2
 import time
-import SimpleITK as sitk
 import os
 import re
 
 
-def get_masks(stack):
+def get_masks(img1, img2):
     #calculate threshold of which to draw our section mask.
-    #based off observation of histograms.
-    masks = []
+    #loosely based off observations of histograms.
 
-    masks.append(process_mask(stack[0]))
+    img1 = process_mask(img1, display=False)
 
-    masks.append(255-process_mask(stack[1])) #nissl, which has different image values so we minus 255
+    img2 = 255-process_mask(img2, display=False) #nissl, which has different image values so we minus 255
 
 
-    return masks[0], masks[1]
+    return img1, img2
 
 def calculate_thresh(img):
     histogram, bins = np.histogram(img.ravel(), bins=256, range=(0,256))
@@ -28,127 +28,153 @@ def calculate_thresh(img):
     return histo_algo(histogram)
 
 
-def histo_algo(histogram): #return 2nd peak after first in histogram for the threshold
+def histo_algo(histogram):
     peaks, _ = find_peaks(histogram, height=300)
     sorted_peaks = sorted(peaks, key=lambda x: histogram[x], reverse=True)
-    #print("sorted peaks",sorted_peaks)
+    print("sorted peaks",sorted_peaks)
     top_two_peaks = sorted_peaks[:2]
-    if abs(top_two_peaks[0] - top_two_peaks[1]) > 50: # if their distance is pretty big, then just return the first peak. In our grayscale images there are two big populations of white and black pixels, resembling our two greatest peaks. we want whatever grayscale value of these to be our threshold.
+    if len(top_two_peaks) == 1: return top_two_peaks[0]-1
+    elif abs(top_two_peaks[0] - top_two_peaks[1]) > 15: # if their distance is pretty big, then just return the first peak. In our grayscale images there are two big populations of white and black pixels, resembling our two greatest peaks. we want whatever grayscale value of these to be our threshold.
         return top_two_peaks[0]
 
-    other_peaks = [peak for peak in sorted_peaks if peak > top_two_peaks[1]]
-    if other_peaks:
-        avg_other_peaks = np.mean(other_peaks).astype(int)
-        min = np.inf
-        for i, num in enumerate(histogram[top_two_peaks[1]:avg_other_peaks]):
-            if num < min:
-                min = num
-            elif num > min:
-                return top_two_peaks[1]+i #index of first bump after the 2nd peak in histogram
     else:
-        return top_two_peaks[1]
+        return (top_two_peaks[0]+top_two_peaks[1])/2
 
-def process_mask(image):
+def process_mask(image, display=False):
     img = image.copy()
     thresh  = calculate_thresh(image)
-    #print(thresh)
+    print(thresh)
     mask = img >= thresh
     img[mask] = 255
 
     mask = img < thresh
     img[mask] = 0
 
-    img = cv2.GaussianBlur(img, (5, 5), 2)
+
+    if display:
+        fig, ax = plt.subplots(1,1, figsize = (12,32))
+        ax.imshow(img, cmap='grey')
+        ax.set_title("image_mask")
+        plt.show()
 
     return img
 
+def find_masks(fixed, moving):
+
+    fixed_mask, moving_mask  = get_masks(fixed, moving)
+
+    return fixed_mask, moving_mask
+
+def downscale_image(image, downscale_factor):
+    #downscales an image while updating its spacing
+
+    original_spacing = image.GetSpacing()
+    original_size = image.GetSize()
+
+    new_size = [int(sz / downscale_factor) for sz in original_size]
+    new_spacing = [sp * downscale_factor for sp in original_spacing]
+
+    resampler = sitk.ResampleImageFilter()
+    resampler.SetOutputSpacing(new_spacing)
+    resampler.SetSize(new_size)
+    resampler.SetOutputDirection(image.GetDirection())
+    resampler.SetOutputOrigin(image.GetOrigin())
+    resampler.SetTransform(sitk.Transform())
+    resampler.SetInterpolator(sitk.sitkLinear)
+
+    #print(f"    Downscaling from {original_size} to {new_size}")
+    return resampler.Execute(image)
 
 
-def preprocess_stack(stack):
-    dapi_mask, nissl_mask  = get_masks(stack)
+def register_images(fixedimg, movingimg):
+    fixed = sitk.GetImageFromArray(fixedimg, sitk.sitkFloat64)
+    moving = sitk.GetImageFromArray(movingimg, sitk.sitkFloat64)
 
-    return [dapi_mask, nissl_mask]
+    fixed.SetSpacing((.908, .908))
+    moving.SetSpacing((.908, .908))
 
-def register_images(fixedimg,movingimg, mask_stack):
-
-    fixedmask = sitk.Cast(sitk.GetImageFromArray(mask_stack[0]), sitk.sitkFloat32)
-    movingmask = sitk.Cast(sitk.GetImageFromArray(mask_stack[1]), sitk.sitkFloat32)
-
-
-
-    print("Registering Nissl...")
-    print("-" * 30)
+    downscale_factor = 32
+    downscaled_fixed = downscale_image(fixed, downscale_factor)
+    downscaled_moving = downscale_image(moving, downscale_factor)
+    downscaled_fixed_spacing = downscaled_fixed.GetSpacing()
+    downscaled_moving_spacing = downscaled_moving.GetSpacing()
 
 
+    downscaled_fixed, downscaled_moving = find_masks(sitk.GetArrayViewFromImage(downscaled_fixed), sitk.GetArrayViewFromImage(downscaled_moving))
 
-    ######################REGISTRATION########################
+    downscaled_fixed = sitk.GetImageFromArray(downscaled_fixed, sitk.sitkFloat64)
+    downscaled_moving = sitk.GetImageFromArray(downscaled_moving, sitk.sitkFloat64)
+    downscaled_fixed.SetSpacing(downscaled_fixed_spacing)
+    downscaled_moving.SetSpacing(downscaled_moving_spacing)
+
+
+    downscaled_fixed = sitk.VectorMagnitude(downscaled_fixed)
+    downscaled_moving = sitk.VectorMagnitude(downscaled_moving)
+    downscaled_fixed = sitk.Cast(downscaled_fixed, sitk.sitkFloat64)
+    downscaled_moving = sitk.Cast(downscaled_moving, sitk.sitkFloat64)
+
+
+    plt.title("Images overlapped pre registration (fixed=red, green=moving)")
+    plt.show()
+    print("####### Starting  Affine registration #######")
+
+    ###################### AFFINE REGISTRATION ########################
     initial_affine = sitk.CenteredTransformInitializer(
-        fixedmask,
-        movingmask,
-        sitk.AffineTransform(fixedmask.GetDimension()),
+        downscaled_fixed,
+        downscaled_moving,
+        sitk.AffineTransform(downscaled_fixed.GetDimension()),
         sitk.CenteredTransformInitializerFilter.GEOMETRY
     )
 
     R = sitk.ImageRegistrationMethod()
     R.SetInitialTransform(initial_affine)
     R.SetMetricAsMeanSquares()
-    R.SetOptimizerAsRegularStepGradientDescent(learningRate=1, minStep=0.001, numberOfIterations=150)
+    R.SetOptimizerAsRegularStepGradientDescent(learningRate=1, minStep=0.001, numberOfIterations=300)
     R.SetMetricSamplingPercentage(0.20)
     R.SetInterpolator(sitk.sitkLinear)
     R.SetOptimizerScalesFromPhysicalShift()
 
-    print("####### Starting Affine Registration #######")
-    affine_transform = R.Execute(fixedmask, movingmask)
-    print("####### Finished Affine Registration #######")
+    affine_transform = R.Execute(downscaled_fixed, downscaled_moving)
 
+    ###################### B-SPLINE REGISTRATION ######################
 
-    ##### B SPLINE #####
-
-    transform_domain_mesh_size = [8] * fixedmask.GetDimension()
-    bspline_initial = sitk.BSplineTransformInitializer(fixedmask, transform_domain_mesh_size)
+    transform_domain_mesh_size = [8] * downscaled_fixed.GetDimension()
+    bspline_initial = sitk.BSplineTransformInitializer(downscaled_fixed, transform_domain_mesh_size)
 
     composite_transform = sitk.CompositeTransform([affine_transform, bspline_initial])
 
-    # By default, the optimizer will ONLY modify the parameters of the LAST transform in the list.
     R.SetInitialTransform(composite_transform)
 
-    # 4. Reconfigure the optimizer for the B-spline stage.
-    R.SetOptimizerScalesFromJacobian() # Better for B-splines
+    # reconfigure for B-spline.
+    R.SetOptimizerScalesFromJacobian()  # Better for B-splines
+    R.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
     R.SetOptimizerAsRegularStepGradientDescent(
-        learningRate=5.0,
+        learningRate=8.0,
         minStep=1e-5,
-        numberOfIterations=320
+        numberOfIterations=400
     )
 
+    print("####### Starting  B-spline registration #######")
+    final_composite_transform = R.Execute(downscaled_fixed, downscaled_moving)
 
-    print("####### Starting  B-spline Registration #######")
-    final_composite_transform = R.Execute(fixedmask, movingmask)
-    print("####### Finished B-spline Registration #######")
+    print("Registered")
 
-    print("####### Transforming and Saving Final Image #######")
+    print("####### Transforming image #######")
+
     ###################### FINAL TRANSFORM ########################
-    fixedimg = sitk.Cast(fixedimg, sitk.sitkFloat32) # DAPI
-    movingimg = sitk.Cast(movingimg, sitk.sitkFloat32) # NISSL
 
-    # V Final resampled image
     final_image = sitk.Resample(
-    movingimg,
-    fixedimg,
-    final_composite_transform,
-    sitk.sitkLinear,
-    0.0,
-    movingimg.GetPixelID()
+        moving,
+        fixed,
+        final_composite_transform,
+        sitk.sitkLinear,
+        0.0,
+        moving.GetPixelID()
     )
-
-
 
     return sitk.GetArrayFromImage(final_image)
 
-
-
-
-
-def run(czi_one, czi_two, output_czi):
+def run(czi_one, czi_two, output_czi, flip_nissl):
     # preparing metadata for writing
     channel_meta_data_file1 = CziChannelInfo(czi_one)
     channel_meta_data_file2 = CziChannelInfo(czi_two)
@@ -159,7 +185,7 @@ def run(czi_one, czi_two, output_czi):
         0)  # there are 4 channels in file 1, so for each channel in file 2, I have to rename each key.
     all_display = {**channel_meta_data_file1.czi_disp_settings, **display2}
 
-    dapi_data = None
+    fixed_image = None
 
 
     with czi.create_czi(output_czi, exist_ok=True) as new_czi_file:
@@ -169,47 +195,42 @@ def run(czi_one, czi_two, output_czi):
 
         print("Combining CZIs")
         print("Copying CZI file one")
-        with czi.open_czi(czi_one) as czi_file:
+        with czi.open_czi(czi_one) as czi_file:  # use last channel in the first file to register to nissl.
             for i in range(len(channel_meta_data_file1.names)):  # for channels/planes in file
                 channel_dict[channel_index] = channel_meta_data_file1.names[i].replace('/', '-')
                 plane = {'C': i}  # Plane, note i == channel_index
                 frame = czi_file.read(plane=plane)
                 new_czi_file.write(frame[:, ::-1, :], plane=plane)  # note ::-1 because the image is otherwise rotated.
                 channel_index += 1
-                #if all_names[i] == "DAPI":  # Save dapi layer to later register nissl. (Assuming dapi has best data for registration)
-                dapi_data = czi_file.read(plane=plane)[:, ::-1, 0] #saves last possible layer
-                dapi_data_shape = dapi_data.shape
 
+                if i == len(channel_meta_data_file1.names) - 1:  # saves last possible layer
+                    fixed_image = czi_file.read(plane=plane)[:, ::-1, 0]
 
-        if dapi_data is None:
-            print("DAPI DATA NOT FOUND IN CZI FILE #1")
-        print("Copied CZI file one")
-
+        print("Copied data in first CZI")
+        print("Retrieving Nissl...")
         # Open the second file. We assume this file contains only the NISSL staining.
         # Not too difficult to adapt the code to something more general (say the 2nd file has more channels than just NISSL)
         with czi.open_czi(czi_two) as czi_file:
+            # find the channel and save it in nissl_data variable so we can close the czi for more memory
             for i in range(len(channel_meta_data_file2.names)):  # for channels in file
                 channel_dict[channel_index] = channel_meta_data_file2.names[i].replace('/', '-')
-                plane = {'C': channel_index}  # Plane
+                # plane = {'C': channel_index}  # Plane
 
                 # if nissl data
-                if channel_meta_data_file2.names[i] == "Bright":  # ************
-                    nissl_data = czi_file.read(plane={'C': i})[:, :, 0]
-                    nissl_data = cv2.resize(nissl_data, (dapi_data_shape[1], dapi_data_shape[0]),
-                                            interpolation=cv2.INTER_AREA)  # ensure same size as original dapi data
+                if channel_meta_data_file2.names[i] == "Bright":  # maybe not bright? idk
+                    if flip_nissl:
+                        nissl_data = czi_file.read(plane={'C': i})[:, ::-1, 0]
+                    else:
+                        nissl_data = czi_file.read(plane={'C': i})[:, :, 0]
+
                     nissl_datamin = nissl_data.min()
                     nissl_datamax = nissl_data.max()  # save later for normalization to original values.
 
-
-
-        dapi_data = cv2.normalize(dapi_data, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+        fixed_image = cv2.normalize(fixed_image, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
         nissl_data = cv2.normalize(nissl_data, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
 
-        # register the masks
         start_time = time.perf_counter()
-        frame = register_images(sitk.GetImageFromArray(dapi_data), sitk.GetImageFromArray(nissl_data), #we're registering full size masks
-                                preprocess_stack(np.stack([dapi_data, nissl_data], axis=0)))
-                                # preprocess stack returns a stack of the masks, so we are registering masks of the images, or more accurately, the outlines
+        frame = register_images(sitk.GetImageFromArray(fixed_image), sitk.GetImageFromArray(nissl_data))
 
 
         end_time = time.perf_counter()
@@ -225,11 +246,22 @@ def run(czi_one, czi_two, output_czi):
         new_czi_file.write_metadata(output_czi, channel_names=channel_dict, display_settings=all_display)
         print("New CZI file written at: ", output_czi)
 
+
+
+
+
     # TODO
 
     # - MAKE ABOVE PROCESS A VISUAL EXPERIENCE.
-    #   -> GUI to visualize rotations and registrations.
-    #
+    #   -> GUI to visualize registrations.
+    #       -> Choose folder and automatically read files or just select two czis files.
+    #       -> Downsized version of the files are displayed, overlapping the last channel of the first and the nissl.
+    #       -> Choose to mirror,
+    #       -> Choose threshold for mask visually
+    #       -> and register, opting for certain parameters and then visualizing the output of the register
+    #       -> hit 'next' to save and continue to the next file to be registered.
+    # - AUTOMATICALLY FIND IF INPUTS ARE MIRRORED
+    #   -> simple rigid registration and metric value comparison with masks.
 
 
 def main():
@@ -262,6 +294,11 @@ def main():
         help="Output folder directory for combined file",
         required=True
     )
+    parser.add_argument(
+        '-m', '--mirrored',
+        help="Are all input images mirrored or no? (TO BE UPDATED TO BE AUTOMATIC)",
+        required=True
+    )
 
 
     args = parser.parse_args()
@@ -270,6 +307,7 @@ def main():
     czi_one_dir = args.czi_one
     czi_two_dir = args.czi_two
     output_dir = args.output
+    flip_nissl = args.mirrored
 
     non_nissl_paths = []
     nissl_paths = []
@@ -347,7 +385,7 @@ def main():
         output_path = f"{output_dir}/{output_file_name}_combined.czi"
         print(f"Beginning combining {non_nissl_paths[i].split('.czi')[0]} and {nissl_paths[i].split('.czi')[0]} to {output_path}")
         try:
-            run(non_nissl_paths[i], nissl_paths[i], output_path)
+            run(non_nissl_paths[i], nissl_paths[i], output_path, flip_nissl)
         except Exception as e:
             print("Failed to convert file: ", non_nissl_paths[i])
             file_exceptions.append(non_nissl_paths[i])
