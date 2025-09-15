@@ -1,6 +1,5 @@
 import argparse
 from pylibCZIrw import czi
-import matplotlib.pyplot as plt
 import SimpleITK as sitk
 import cv2
 import numpy as np
@@ -15,10 +14,9 @@ def get_masks(img1, img2):
     #calculate threshold of which to draw our section mask.
     #loosely based off observations of histograms.
 
-    img1 = process_mask(img1, display=False)
+    img1 = process_mask(img1)
 
-    img2 = 255-process_mask(img2, display=False) #nissl, which has different image values so we minus 255
-
+    img2 = 255-process_mask(img2) #nissl, which has different image values so we minus 255
 
     return img1, img2
 
@@ -31,7 +29,6 @@ def calculate_thresh(img):
 def histo_algo(histogram):
     peaks, _ = find_peaks(histogram, height=300)
     sorted_peaks = sorted(peaks, key=lambda x: histogram[x], reverse=True)
-    print("sorted peaks",sorted_peaks)
     top_two_peaks = sorted_peaks[:2]
     if len(top_two_peaks) == 1: return top_two_peaks[0]-1
     elif abs(top_two_peaks[0] - top_two_peaks[1]) > 15: # if their distance is pretty big, then just return the first peak. In our grayscale images there are two big populations of white and black pixels, resembling our two greatest peaks. we want whatever grayscale value of these to be our threshold.
@@ -40,10 +37,9 @@ def histo_algo(histogram):
     else:
         return (top_two_peaks[0]+top_two_peaks[1])/2
 
-def process_mask(image, display=False):
+def process_mask(image):
     img = image.copy()
     thresh  = calculate_thresh(image)
-    print(thresh)
     mask = img >= thresh
     img[mask] = 255
 
@@ -51,11 +47,6 @@ def process_mask(image, display=False):
     img[mask] = 0
 
 
-    if display:
-        fig, ax = plt.subplots(1,1, figsize = (12,32))
-        ax.imshow(img, cmap='grey')
-        ax.set_title("image_mask")
-        plt.show()
 
     return img
 
@@ -114,8 +105,7 @@ def register_images(fixedimg, movingimg):
     downscaled_moving = sitk.Cast(downscaled_moving, sitk.sitkFloat64)
 
 
-    plt.title("Images overlapped pre registration (fixed=red, green=moving)")
-    plt.show()
+
     print("####### Starting  Affine registration #######")
 
     ###################### AFFINE REGISTRATION ########################
@@ -226,11 +216,15 @@ def run(czi_one, czi_two, output_czi, flip_nissl):
                     nissl_datamin = nissl_data.min()
                     nissl_datamax = nissl_data.max()  # save later for normalization to original values.
 
+
         fixed_image = cv2.normalize(fixed_image, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
         nissl_data = cv2.normalize(nissl_data, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
 
+
+        print("####### STARTING REGISTRATION #######")
         start_time = time.perf_counter()
-        frame = register_images(sitk.GetImageFromArray(fixed_image), sitk.GetImageFromArray(nissl_data))
+
+        frame = register_images(fixed_image, nissl_data)
 
 
         end_time = time.perf_counter()
@@ -238,13 +232,15 @@ def run(czi_one, czi_two, output_czi, flip_nissl):
 
         frame = cv2.normalize(frame, None, alpha=nissl_datamin, beta=nissl_datamax, norm_type=cv2.NORM_MINMAX)  # normalize back to original values.
         frame = frame.astype(np.uint16)
+        plane = {'C': channel_index}
 
+
+        print("Copied NISSL data")
+        # write new czi
         new_czi_file.write(frame, plane=plane)
-
-        print("Copied CZI file two")
-        print("Found and added channels: ", channel_dict)
         new_czi_file.write_metadata(output_czi, channel_names=channel_dict, display_settings=all_display)
         print("New CZI file written at: ", output_czi)
+        print("Found and added channels: ", channel_dict)
 
 
 
@@ -313,7 +309,8 @@ def main():
         flip_nissl = True
     else:
         flip_nissl = False
-    
+
+
 
     non_nissl_paths = []
     nissl_paths = []
@@ -408,4 +405,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
