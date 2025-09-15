@@ -190,11 +190,12 @@ def run(czi_one, czi_two, output_czi, flip_nissl):
                 channel_dict[channel_index] = channel_meta_data_file1.names[i].replace('/', '-')
                 plane = {'C': i}  # Plane, note i == channel_index
                 frame = czi_file.read(plane=plane)
-                new_czi_file.write(frame[:, ::-1, :], plane=plane)  # note ::-1 because the image is otherwise rotated.
+                new_czi_file.write(frame[:, :, :], plane=plane)
                 channel_index += 1
 
                 if i == len(channel_meta_data_file1.names) - 1:  # saves last possible layer
-                    fixed_image = czi_file.read(plane=plane)[:, ::-1, 0]
+                    print(f"Saving {channel_meta_data_file1.names[i]} as the fixed image")
+                    fixed_image = frame[:, :, :]
 
         print("Copied data in first CZI")
         print("Retrieving Nissl...")
@@ -306,6 +307,7 @@ def main():
     flip_nissl = args.mirrored
 
     if flip_nissl == "True":
+        print("Flipping nissl images")
         flip_nissl = True
     else:
         flip_nissl = False
@@ -385,8 +387,8 @@ def main():
 
     for i in range(len(non_nissl_paths)):
         output_file_name = non_nissl_paths[i].split("\\")[-1].split('.czi')[0]
-        output_path = f"{output_dir}/{output_file_name}_combined.czi"
-        print(f"Beginning combining {non_nissl_paths[i].split('.czi')[0]} and {nissl_paths[i].split('.czi')[0]} to {output_path}")
+        output_path = f"{output_dir}\\{output_file_name} combined.czi"
+        print(f"Beginning combination of files: {non_nissl_paths[i]} and {nissl_paths[i]} to {output_path}")
         try:
             run(non_nissl_paths[i], nissl_paths[i], output_path, flip_nissl)
         except Exception as e:
