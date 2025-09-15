@@ -309,6 +309,12 @@ def main():
     output_dir = args.output
     flip_nissl = args.mirrored
 
+    if flip_nissl == "True":
+        flip_nissl = True
+    else:
+        flip_nissl = False
+    
+
     non_nissl_paths = []
     nissl_paths = []
 
@@ -402,3 +408,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
